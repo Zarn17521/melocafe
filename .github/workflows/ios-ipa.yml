@@ -1,0 +1,89 @@
+name: Build MeloCafe 1.2 iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/ios-ipa.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Configure the arm64 iPhoneOS Cemu project
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          df -h .
+          ./dependencies/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          cmake -S . -B build -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DVCPKG_INSTALL_OPTIONS=--clean-after-build
+          test -f build/Cemu.xcodeproj/project.pbxproj
+
+      - name: Resolve the generated Cemu framework references
+        run: |
+          plutil -convert json -o build/cemu-project.json build/Cemu.xcodeproj/project.pbxproj
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          objects = json.loads(Path("build/cemu-project.json").read_text())["objects"]
+          target_id, target = next(
+              (key, value) for key, value in objects.items()
+              if value.get("isa") == "PBXNativeTarget" and value.get("name") == "CemuBin"
+          )
+          project = Path("MeloCafe/MeloCafe.xcodeproj/project.pbxproj")
+          original = project.read_text()
+          replacements = {
+              "6DF54B2C438755972DF5DC0A": target_id,
+              "B8C8930763394E3D9BA8D0BF": target["productReference"],
+          }
+          for old_id, new_id in replacements.items():
+              original = original.replace(f"remoteGlobalIDString = {old_id};", f"remoteGlobalIDString = {new_id};")
+          project.write_text(original)
+          PY
+
+      - name: Build the iOS app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace MeloCafe/MeloCafe.xcworkspace \
+            -scheme MeloCafe \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee build/xcodebuild.log
+
+      - name: Package the unsigned IPA
+        run: |
+          app=build/DerivedData/Build/Products/Release-iphoneos/MeloCafe.app
+          test -f "$app/Frameworks/Cemu.framework/Cemu"
+          mkdir -p build/ipa/Payload
+          ditto "$app" build/ipa/Payload/MeloCafe.app
+          (cd build/ipa && zip -qry ../MeloCafe-1.2.ipa Payload)
+          unzip -tq build/MeloCafe-1.2.ipa
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: MeloCafe-1.2-iPhone15
+          path: build/MeloCafe-1.2.ipa
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: MeloCafe-iOS-build-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
