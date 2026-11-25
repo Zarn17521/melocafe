@@ -18,17 +18,36 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Configure the ZArchive command-line tool as a non-bundle target
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          project = Path("dependencies/ZArchive/CMakeLists.txt")
+          source = project.read_text(encoding="utf-8-sig")
+          source, count = re.subn(
+              r"(?mi)^(\s*add_executable\s*\(zarchiveTool\b[^\n]*\)\s*\n)",
+              r"\1set_target_properties(zarchiveTool PROPERTIES MACOSX_BUNDLE FALSE)\n",
+              source,
+          )
+          if count != 1:
+              raise SystemExit("Could not locate the ZArchive command-line target")
+          project.write_text(source, encoding="utf-8-sig")
+          PY
+
       - name: Configure the arm64 iPhoneOS Cemu project
         run: |
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
           df -h .
           ./dependencies/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          set -o pipefail
           cmake -S . -B build -G Xcode \
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_SYSROOT=iphoneos \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DVCPKG_INSTALL_OPTIONS=--clean-after-build
+            -DVCPKG_INSTALL_OPTIONS=--clean-after-build 2>&1 | tee cmake-configure.log
           test -f build/Cemu.xcodeproj/project.pbxproj
 
       - name: Resolve the generated Cemu framework references
@@ -85,5 +104,7 @@ jobs:
         if: failure()
         with:
           name: MeloCafe-iOS-build-log
-          path: build/xcodebuild.log
+          path: |
+            cmake-configure.log
+            build/xcodebuild.log
           if-no-files-found: ignore
